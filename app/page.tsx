@@ -8,10 +8,10 @@ type Mood = 'neutral' | 'smile' | 'laugh';
 type Particle = {
   x: number; y: number; px: number; py: number; vx: number; vy: number;
   radius: number; life: number; maxLife: number;
-  kind: 'rain' | 'spark' | 'ember';
+  kind: 'rain' | 'spark' | 'ember' | 'splash';
   tone: number; phase: number; trail: number; collided: boolean;
 };
-type Burst = { x: number; y: number; life: number; maxLife: number; tone: number; rotation: number };
+type Burst = { x: number; y: number; life: number; maxLife: number; tone: number; rotation: number; kind: 'firework' | 'water' };
 type FaceCollider = { cx: number; cy: number; rx: number; ry: number; visible: boolean };
 type Blendshape = { categoryName: string; score: number };
 type Landmark = { x: number; y: number; z: number };
@@ -27,7 +27,7 @@ type FaceLandmarkerLike = {
 const VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
-const COLORS = ['#ffe9a8', '#77e7ff', '#b99cff', '#ff7fbd', '#7fffd4', '#ffffff'];
+const COLORS = ['#e9fbff', '#8de4ff', '#88a8ff', '#b89cff'];
 
 function rgba(hex: string, alpha: number) {
   const value = hex.replace('#', '');
@@ -39,6 +39,19 @@ function rgba(hex: string, alpha: number) {
 
 function clamp(value: number, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
+}
+
+function expressionThresholds(sensitivity: number) {
+  const value = clamp(sensitivity);
+  const smileEnter = 0.54 - value * 0.28;
+  return {
+    smileEnter,
+    smileExit: Math.max(0.14, smileEnter - 0.11),
+    laughEnter: 0.82 - value * 0.34,
+    laughExit: 0.62 - value * 0.2,
+    jawEnter: 0.38 - value * 0.22,
+    jawExit: 0.25 - value * 0.1,
+  };
 }
 
 function scoreOf(categories: Blendshape[], name: string) {
@@ -61,11 +74,16 @@ export default function Home() {
   const landmarkerRef = useRef<FaceLandmarkerLike | null>(null);
   const frameRef = useRef(0);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
+  const sensitivityRef = useRef(0.72);
   const [status, setStatus] = useState<Status>('idle');
   const [mood, setMood] = useState<Mood>('neutral');
   const [error, setError] = useState('');
   const [showMetrics, setShowMetrics] = useState(false);
-  const [metrics, setMetrics] = useState({ fps: 0, inference: 0, particles: 0, budget: 300, tier: '影院' });
+  const [sensitivity, setSensitivity] = useState(72);
+  const [metrics, setMetrics] = useState({
+    fps: 0, inference: 0, particles: 0, budget: 300, tier: '影院',
+    smile: 0, jaw: 0, smileThreshold: 0.34, laughThreshold: 0.58,
+  });
 
   const stopExperience = useCallback(() => {
     cancelAnimationFrame(frameRef.current);
@@ -107,6 +125,7 @@ export default function Home() {
     let lastFirework = -3000;
     let smoothSmile = 0;
     let smoothLaugh = 0;
+    let smoothJaw = 0;
     let currentMood: Mood = 'neutral';
 
     // These tiny glow textures are baked once. Every live particle reuses them,
@@ -134,10 +153,10 @@ export default function Home() {
       if (!spriteContext) return sprite;
       const glow = spriteContext.createRadialGradient(80, 80, 0, 80, 80, 80);
       glow.addColorStop(0, 'rgba(255,255,255,1)');
-      glow.addColorStop(0.05, 'rgba(255,242,195,.96)');
-      glow.addColorStop(0.2, 'rgba(137,211,255,.46)');
-      glow.addColorStop(0.55, 'rgba(167,114,255,.14)');
-      glow.addColorStop(1, 'rgba(120,90,255,0)');
+      glow.addColorStop(0.05, 'rgba(217,248,255,.96)');
+      glow.addColorStop(0.2, 'rgba(126,188,255,.46)');
+      glow.addColorStop(0.55, 'rgba(144,112,255,.14)');
+      glow.addColorStop(1, 'rgba(92,80,220,0)');
       spriteContext.fillStyle = glow;
       spriteContext.fillRect(0, 0, 160, 160);
       spriteContext.translate(80, 80);
@@ -203,53 +222,91 @@ export default function Home() {
       lastFirework = now;
       const originX = collider.visible ? collider.cx : width * 0.5;
       const originY = collider.visible ? Math.max(100, collider.cy - collider.ry * 1.3) : height * 0.38;
-      bursts.push({ x: originX, y: originY, life: 0.72, maxLife: 0.72, tone: 0, rotation: Math.random() * Math.PI });
+      bursts.push({
+        x: originX, y: originY, life: 0.64, maxLife: 0.64,
+        tone: 2, rotation: Math.random() * Math.PI, kind: 'firework',
+      });
 
-      // A five-armed spiral plus a loose ember halo reads as a designed game VFX,
-      // while using fewer particles than an undifferentiated random explosion.
-      const count = Math.round((lowPower ? 68 : 112) * qualityScale);
-      const spiralCount = Math.round(count * 0.72);
-      for (let index = 0; index < count && particles.length < particleBudget; index += 1) {
-        const isSpiral = index < spiralCount;
-        const arm = index % 5;
-        const step = Math.floor(index / 5);
-        const angle = isSpiral
-          ? arm * (Math.PI * 2 / 5) + step * 0.145 + Math.random() * 0.035
-          : Math.random() * Math.PI * 2;
-        const speed = isSpiral ? 145 + step * 9 + Math.random() * 42 : 70 + Math.random() * 210;
-        const tone = isSpiral ? [0, 1, 2, 0, 3][arm] : Math.floor(Math.random() * COLORS.length);
+      const outerCount = Math.round((lowPower ? 72 : 126) * qualityScale);
+      const innerCount = Math.round((lowPower ? 38 : 64) * qualityScale);
+      const dustCount = Math.round((lowPower ? 24 : 46) * qualityScale);
+      const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+
+      for (let index = 0; index < outerCount && particles.length < particleBudget; index += 1) {
+        const angle = index * goldenAngle + Math.random() * 0.018;
+        const wave = 0.82 + Math.sin(index * 0.41) * 0.12;
+        const speed = (142 + Math.random() * 128) * wave;
+        const tone = index % 9 === 0 ? 3 : index % 4 === 0 ? 2 : 1;
         particles.push({
           x: originX, y: originY, px: originX, py: originY,
           vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
-          radius: isSpiral ? 2.2 + Math.random() * 2.2 : 1.2 + Math.random() * 2,
-          life: isSpiral ? 1.4 + Math.random() * 1.05 : 0.75 + Math.random() * 1.25,
-          maxLife: 2.45, kind: isSpiral ? 'spark' : 'ember', tone,
-          phase: Math.random() * Math.PI * 2, trail: isSpiral ? 1 : 0.46 + Math.random() * 0.3,
-          collided: false,
+          radius: 1.05 + Math.random() * 1.45, life: 1.45 + Math.random() * 1.1,
+          maxLife: 2.55, kind: 'spark', tone, phase: Math.random() * Math.PI * 2,
+          trail: 0.88 + Math.random() * 0.25, collided: false,
+        });
+      }
+
+      for (let index = 0; index < innerCount && particles.length < particleBudget; index += 1) {
+        const angle = index / innerCount * Math.PI * 2 + Math.sin(index * 1.7) * 0.055;
+        const speed = 72 + Math.random() * 96;
+        particles.push({
+          x: originX, y: originY, px: originX, py: originY,
+          vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+          radius: 0.8 + Math.random() * 1.1, life: 1.1 + Math.random() * 0.85,
+          maxLife: 1.95, kind: 'spark', tone: index % 3 === 0 ? 3 : 2,
+          phase: Math.random() * Math.PI * 2, trail: 0.62, collided: false,
+        });
+      }
+
+      for (let index = 0; index < dustCount && particles.length < particleBudget; index += 1) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 25 + Math.random() * 150;
+        particles.push({
+          x: originX, y: originY, px: originX, py: originY,
+          vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+          radius: 0.35 + Math.random() * 0.7, life: 0.6 + Math.random() * 1.25,
+          maxLife: 1.85, kind: 'ember', tone: Math.random() > 0.7 ? 2 : 0,
+          phase: Math.random() * Math.PI * 2, trail: 0.28, collided: false,
         });
       }
     };
 
     const spawnRain = (dt: number) => {
-      const amount = Math.min(6, Math.ceil(dt * (lowPower ? 46 : 78) * qualityScale));
+      const amount = Math.min(5, Math.ceil(dt * (lowPower ? 38 : 68) * qualityScale));
       for (let index = 0; index < amount && particles.length < particleBudget; index += 1) {
         const x = Math.random() * width; const y = -20 - Math.random() * 70;
-        const depth = 0.55 + Math.random() * 0.75;
+        const depth = 0.58 + Math.random() * 0.72;
         particles.push({
-          x, y, px: x, py: y, vx: (-22 + Math.random() * 14) * depth, vy: (390 + Math.random() * 220) * depth,
-          radius: 0.9 + depth * 1.1, life: 2.6, maxLife: 2.6, kind: 'rain', tone: 1,
-          phase: Math.random() * Math.PI * 2, trail: 0.8 + depth * 0.55, collided: false,
+          x, y, px: x, py: y, vx: (-10 + Math.random() * 6) * depth, vy: (310 + Math.random() * 230) * depth,
+          radius: 0.35 + depth * 0.52, life: 2.9, maxLife: 2.9, kind: 'rain', tone: Math.random() > 0.72 ? 2 : 1,
+          phase: Math.random() * Math.PI * 2, trail: 0.62 + depth * 0.38, collided: false,
         });
       }
     };
 
+    const spawnSplash = (x: number, y: number, energy: number) => {
+      const count = Math.round((lowPower ? 5 : 8) * qualityScale);
+      for (let index = 0; index < count && particles.length < particleBudget; index += 1) {
+        const angle = -Math.PI + Math.random() * Math.PI;
+        const speed = (48 + Math.random() * 125) * (0.75 + energy * 0.35);
+        particles.push({
+          x, y, px: x, py: y, vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed - 25, radius: 0.55 + Math.random() * 0.8,
+          life: 0.38 + Math.random() * 0.38, maxLife: 0.76, kind: 'splash',
+          tone: Math.random() > 0.8 ? 2 : 1, phase: Math.random() * Math.PI * 2,
+          trail: 0.42, collided: false,
+        });
+      }
+      bursts.push({ x, y, life: 0.36, maxLife: 0.36, tone: 1, rotation: 0, kind: 'water' });
+    };
+
     const collideWithHead = (particle: Particle) => {
-      if (!collider.visible) return;
+      if (!collider.visible) return false;
       const expandedRx = collider.rx + particle.radius;
       const expandedRy = collider.ry + particle.radius;
       const dx = particle.x - collider.cx; const dy = particle.y - collider.cy;
       const value = (dx * dx) / (expandedRx * expandedRx) + (dy * dy) / (expandedRy * expandedRy);
-      if (value >= 1) return;
+      if (value >= 1) return false;
       particle.collided = true;
       const length = Math.sqrt(value) || 0.001;
       const nx = dx / (expandedRx * expandedRx * length);
@@ -259,25 +316,29 @@ export default function Home() {
       const boundaryScale = 1 / length;
       particle.x = collider.cx + dx * boundaryScale;
       particle.y = collider.cy + dy * boundaryScale;
+      if (particle.kind === 'rain') return true;
       const velocityAlongNormal = particle.vx * ux + particle.vy * uy;
       if (velocityAlongNormal < 0) {
-        const bounce = particle.kind === 'rain' ? 0.34 : particle.kind === 'ember' ? 0.56 : 0.74;
+        const bounce = particle.kind === 'ember' ? 0.56 : 0.74;
         particle.vx -= (1 + bounce) * velocityAlongNormal * ux;
         particle.vy -= (1 + bounce) * velocityAlongNormal * uy;
       }
-      particle.vx += ux * (particle.kind === 'rain' ? 24 : 44);
+      particle.vx += ux * 44;
+      return true;
     };
 
     const updateMood = (smile: number, jawOpen: number, now: number) => {
       smoothSmile += (smile - smoothSmile) * 0.32;
+      smoothJaw += (jawOpen - smoothJaw) * 0.34;
       const rawLaugh = clamp(smile * 0.72 + jawOpen * 0.62);
       smoothLaugh += (rawLaugh - smoothLaugh) * 0.34;
-      if (!smileActive && smoothSmile >= 0.43) smileActive = true;
-      if (smileActive && smoothSmile <= 0.3) smileActive = false;
-      if (!laughActive && smoothLaugh >= 0.68 && jawOpen >= 0.28) {
+      const thresholds = expressionThresholds(sensitivityRef.current);
+      if (!smileActive && smoothSmile >= thresholds.smileEnter) smileActive = true;
+      if (smileActive && smoothSmile <= thresholds.smileExit) smileActive = false;
+      if (!laughActive && smoothLaugh >= thresholds.laughEnter && smoothJaw >= thresholds.jawEnter) {
         laughActive = true; spawnFirework(now);
       }
-      if (laughActive && (smoothLaugh <= 0.48 || jawOpen <= 0.16)) laughActive = false;
+      if (laughActive && (smoothLaugh <= thresholds.laughExit || smoothJaw <= thresholds.jawExit)) laughActive = false;
       const nextMood: Mood = laughActive ? 'laugh' : smileActive ? 'smile' : 'neutral';
       if (nextMood !== currentMood) { currentMood = nextMood; setMood(nextMood); }
     };
@@ -318,11 +379,16 @@ export default function Home() {
       for (let index = particles.length - 1; index >= 0; index -= 1) {
         const particle = particles[index];
         particle.px = particle.x; particle.py = particle.y; particle.life -= dt;
-        particle.phase += dt * (particle.kind === 'ember' ? 8 : 4.5);
-        particle.vy += (particle.kind === 'rain' ? 520 : particle.kind === 'ember' ? 155 : 105) * dt;
-        particle.vx *= Math.pow(particle.kind === 'rain' ? 0.994 : particle.kind === 'ember' ? 0.972 : 0.986, dt * 60);
+        particle.phase += dt * (particle.kind === 'ember' ? 8 : particle.kind === 'splash' ? 7 : 4.5);
+        particle.vy += (particle.kind === 'rain' ? 520 : particle.kind === 'ember' ? 155 : particle.kind === 'splash' ? 280 : 105) * dt;
+        particle.vx *= Math.pow(particle.kind === 'rain' ? 0.994 : particle.kind === 'ember' ? 0.972 : particle.kind === 'splash' ? 0.982 : 0.986, dt * 60);
         particle.x += particle.vx * dt; particle.y += particle.vy * dt;
-        collideWithHead(particle);
+        if (particle.kind === 'rain' && collideWithHead(particle)) {
+          spawnSplash(particle.x, particle.y, Math.min(1.4, particle.vy / 450));
+          particles.splice(index, 1);
+          continue;
+        }
+        if (particle.kind === 'spark' || particle.kind === 'ember') collideWithHead(particle);
         if (particle.life <= 0 || particle.y > height + 80 || particle.x < -100 || particle.x > width + 100) {
           particles.splice(index, 1); continue;
         }
@@ -340,6 +406,15 @@ export default function Home() {
         const progress = 1 - burst.life / burst.maxLife;
         const eased = 1 - Math.pow(1 - progress, 3);
         const fade = Math.pow(1 - progress, 1.7);
+        if (burst.kind === 'water') {
+          context.globalAlpha = fade * 0.72;
+          context.strokeStyle = 'rgba(161,231,255,.92)';
+          context.lineWidth = 0.75;
+          context.beginPath();
+          context.ellipse(burst.x, burst.y, 2 + eased * 28, 0.8 + eased * 7, 0, 0, Math.PI * 2);
+          context.stroke();
+          continue;
+        }
         const bloomSize = 120 + eased * 290;
         context.globalAlpha = fade * 0.82;
         context.drawImage(flareSprite, burst.x - bloomSize / 2, burst.y - bloomSize / 2, bloomSize, bloomSize);
@@ -359,26 +434,37 @@ export default function Home() {
       }
 
       // Layer 2: rain is batched into two luminous passes instead of one shadow blur per drop.
-      context.globalAlpha = 0.26;
-      context.strokeStyle = 'rgba(44,164,255,.86)';
-      context.lineWidth = 4.6;
+      context.globalAlpha = 0.18;
+      context.strokeStyle = 'rgba(47,169,255,.8)';
+      context.lineWidth = 2.4;
       context.beginPath();
       for (const particle of particles) {
         if (particle.kind !== 'rain') continue;
-        const length = Math.min(42, Math.abs(particle.vy) * 0.05 * particle.trail);
-        context.moveTo(particle.x - particle.vx * 0.035, particle.y - length);
-        context.lineTo(particle.x, particle.y + 7);
+        const length = Math.min(18, Math.abs(particle.vy) * 0.026 * particle.trail);
+        context.moveTo(particle.x - particle.vx * 0.025, particle.y - length);
+        context.lineTo(particle.x, particle.y + 2);
       }
       context.stroke();
-      context.globalAlpha = 0.84;
-      context.strokeStyle = 'rgba(210,247,255,.96)';
-      context.lineWidth = 1.05;
+      context.globalAlpha = 0.78;
+      context.strokeStyle = 'rgba(209,248,255,.94)';
+      context.lineWidth = 0.58;
       context.beginPath();
       for (const particle of particles) {
         if (particle.kind !== 'rain') continue;
-        const length = Math.min(34, Math.abs(particle.vy) * 0.043 * particle.trail);
-        context.moveTo(particle.x - particle.vx * 0.03, particle.y - length);
-        context.lineTo(particle.x, particle.y + 6);
+        const length = Math.min(14, Math.abs(particle.vy) * 0.022 * particle.trail);
+        context.moveTo(particle.x - particle.vx * 0.02, particle.y - length);
+        context.lineTo(particle.x, particle.y + 1.5);
+      }
+      context.stroke();
+
+      context.globalAlpha = 0.62;
+      context.strokeStyle = 'rgba(178,239,255,.92)';
+      context.lineWidth = 0.7;
+      context.beginPath();
+      for (const particle of particles) {
+        if (particle.kind !== 'splash') continue;
+        context.moveTo(particle.px, particle.py);
+        context.lineTo(particle.x, particle.y);
       }
       context.stroke();
 
@@ -389,7 +475,7 @@ export default function Home() {
         context.lineWidth = 5.2;
         context.beginPath();
         for (const particle of particles) {
-          if (particle.kind === 'rain' || particle.tone !== tone) continue;
+          if (particle.kind === 'rain' || particle.kind === 'splash' || particle.tone !== tone) continue;
           const trailTime = (particle.kind === 'spark' ? 0.075 : 0.035) * particle.trail;
           context.moveTo(particle.x, particle.y);
           context.lineTo(particle.x - particle.vx * trailTime, particle.y - particle.vy * trailTime);
@@ -399,7 +485,7 @@ export default function Home() {
         context.lineWidth = 1.05;
         context.beginPath();
         for (const particle of particles) {
-          if (particle.kind === 'rain' || particle.tone !== tone) continue;
+          if (particle.kind === 'rain' || particle.kind === 'splash' || particle.tone !== tone) continue;
           const trailTime = (particle.kind === 'spark' ? 0.065 : 0.03) * particle.trail;
           context.moveTo(particle.x, particle.y);
           context.lineTo(particle.x - particle.vx * trailTime, particle.y - particle.vy * trailTime);
@@ -442,9 +528,12 @@ export default function Home() {
           qualityScale = Math.min(1, qualityScale + 0.08); fastSamples = 0;
           particleBudget = Math.round(baseParticleBudget * qualityScale);
         }
+        const thresholdSnapshot = expressionThresholds(sensitivityRef.current);
         setMetrics({
           fps: measuredFps, inference: Math.round(inferenceCount / elapsed), particles: particles.length,
           budget: particleBudget, tier: `${lowPower ? '节能精致' : '影院'} ${Math.round(qualityScale * 100)}%`,
+          smile: smoothSmile, jaw: smoothJaw,
+          smileThreshold: thresholdSnapshot.smileEnter, laughThreshold: thresholdSnapshot.laughEnter,
         });
         lastMetricUpdate = now; framesForMetric = 0; inferenceCount = 0;
       }
@@ -516,7 +605,7 @@ export default function Home() {
         <div className="vignette" aria-hidden="true" />
         <header className="topbar">
           <a className="brand" href="#" aria-label="Smile Storm 首页"><span className="brand-mark">S</span><span>SMILE STORM</span></a>
-          <button className="metric-toggle" type="button" onClick={() => setShowMetrics((value) => !value)} aria-pressed={showMetrics}><span className="live-dot" /> 性能 {showMetrics ? '收起' : '详情'}</button>
+          <button className="metric-toggle" type="button" onClick={() => setShowMetrics((value) => !value)} aria-pressed={showMetrics}><span className="live-dot" /> 灵敏度 · 性能 {showMetrics ? '收起' : '调参'}</button>
         </header>
 
         {(status === 'ready' || status === 'demo') && (
@@ -526,10 +615,25 @@ export default function Home() {
           </div>
         )}
         {showMetrics && (
-          <aside className="metrics" aria-label="实时性能数据">
+          <aside className="metrics" aria-label="表情灵敏度与实时性能数据">
+            <label className="sensitivity-control">
+              <span className="sensitivity-head"><span>表情灵敏度</span><b>{sensitivity}%</b></span>
+              <input
+                type="range" min="30" max="95" step="1" value={sensitivity}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  setSensitivity(next); sensitivityRef.current = next / 100;
+                }}
+                aria-label="表情识别灵敏度"
+              />
+              <small>调高更容易触发；过高可能把说话误判为大笑</small>
+            </label>
+            <div><span>微笑分数 / 阈值</span><b>{metrics.smile.toFixed(2)} / {metrics.smileThreshold.toFixed(2)}</b></div>
+            <div><span>张嘴分数</span><b>{metrics.jaw.toFixed(2)}</b></div>
+            <div><span>大笑阈值</span><b>{metrics.laughThreshold.toFixed(2)}</b></div>
             <div><span>渲染</span><b>{metrics.fps} FPS</b></div><div><span>推理</span><b>{metrics.inference} 次/秒</b></div>
             <div><span>粒子</span><b>{metrics.particles} / {metrics.budget}</b></div><div><span>档位</span><b>{metrics.tier}</b></div>
-            <p>发光纹理已预烘焙并复用；识别与渲染均在本机完成，视频不会上传。</p>
+            <p>冷色发光纹理已预烘焙并复用；识别与渲染均在本机完成，视频不会上传。</p>
           </aside>
         )}
 
