@@ -8,8 +8,10 @@ type Mood = 'neutral' | 'smile' | 'laugh';
 type Particle = {
   x: number; y: number; px: number; py: number; vx: number; vy: number;
   radius: number; life: number; maxLife: number;
-  kind: 'rain' | 'spark'; color: string;
+  kind: 'rain' | 'spark' | 'ember';
+  tone: number; phase: number; trail: number; collided: boolean;
 };
+type Burst = { x: number; y: number; life: number; maxLife: number; tone: number; rotation: number };
 type FaceCollider = { cx: number; cy: number; rx: number; ry: number; visible: boolean };
 type Blendshape = { categoryName: string; score: number };
 type Landmark = { x: number; y: number; z: number };
@@ -25,7 +27,15 @@ type FaceLandmarkerLike = {
 const VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
-const COLORS = ['#ffc857', '#ff5d8f', '#a78bfa', '#5eead4', '#60a5fa', '#f8fafc'];
+const COLORS = ['#ffe9a8', '#77e7ff', '#b99cff', '#ff7fbd', '#7fffd4', '#ffffff'];
+
+function rgba(hex: string, alpha: number) {
+  const value = hex.replace('#', '');
+  const red = Number.parseInt(value.slice(0, 2), 16);
+  const green = Number.parseInt(value.slice(2, 4), 16);
+  const blue = Number.parseInt(value.slice(4, 6), 16);
+  return `rgba(${red},${green},${blue},${alpha})`;
+}
 
 function clamp(value: number, min = 0, max = 1) {
   return Math.min(max, Math.max(min, value));
@@ -55,7 +65,7 @@ export default function Home() {
   const [mood, setMood] = useState<Mood>('neutral');
   const [error, setError] = useState('');
   const [showMetrics, setShowMetrics] = useState(false);
-  const [metrics, setMetrics] = useState({ fps: 0, inference: 0, particles: 0, tier: '标准' });
+  const [metrics, setMetrics] = useState({ fps: 0, inference: 0, particles: 0, budget: 300, tier: '影院' });
 
   const stopExperience = useCallback(() => {
     cancelAnimationFrame(frameRef.current);
@@ -76,10 +86,15 @@ export default function Home() {
 
     const lowPower = (navigator.hardwareConcurrency || 8) <= 4 ||
       ((navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8) <= 4;
-    const maxParticles = lowPower ? 220 : 420;
+    const baseParticleBudget = lowPower ? 170 : 300;
+    let particleBudget = baseParticleBudget;
+    let qualityScale = 1;
+    let slowSamples = 0;
+    let fastSamples = 0;
     const inferenceInterval = lowPower ? 84 : 50;
     const collider: FaceCollider = { cx: 0, cy: 0, rx: 0, ry: 0, visible: false };
     const particles: Particle[] = [];
+    const bursts: Burst[] = [];
     let width = 1;
     let height = 1;
     let lastFrame = performance.now();
@@ -94,9 +109,56 @@ export default function Home() {
     let smoothLaugh = 0;
     let currentMood: Mood = 'neutral';
 
+    // These tiny glow textures are baked once. Every live particle reuses them,
+    // avoiding hundreds of radial-gradient and shadow-blur calculations per frame.
+    const glowSprites = COLORS.map((color) => {
+      const sprite = document.createElement('canvas');
+      sprite.width = 80; sprite.height = 80;
+      const spriteContext = sprite.getContext('2d');
+      if (!spriteContext) return sprite;
+      const glow = spriteContext.createRadialGradient(40, 40, 0, 40, 40, 40);
+      glow.addColorStop(0, '#ffffff');
+      glow.addColorStop(0.08, rgba(color, 1));
+      glow.addColorStop(0.28, rgba(color, 0.72));
+      glow.addColorStop(0.62, rgba(color, 0.16));
+      glow.addColorStop(1, rgba(color, 0));
+      spriteContext.fillStyle = glow;
+      spriteContext.fillRect(0, 0, 80, 80);
+      return sprite;
+    });
+
+    const flareSprite = (() => {
+      const sprite = document.createElement('canvas');
+      sprite.width = 160; sprite.height = 160;
+      const spriteContext = sprite.getContext('2d');
+      if (!spriteContext) return sprite;
+      const glow = spriteContext.createRadialGradient(80, 80, 0, 80, 80, 80);
+      glow.addColorStop(0, 'rgba(255,255,255,1)');
+      glow.addColorStop(0.05, 'rgba(255,242,195,.96)');
+      glow.addColorStop(0.2, 'rgba(137,211,255,.46)');
+      glow.addColorStop(0.55, 'rgba(167,114,255,.14)');
+      glow.addColorStop(1, 'rgba(120,90,255,0)');
+      spriteContext.fillStyle = glow;
+      spriteContext.fillRect(0, 0, 160, 160);
+      spriteContext.translate(80, 80);
+      spriteContext.strokeStyle = 'rgba(255,255,255,.9)';
+      spriteContext.lineCap = 'round';
+      [[58, 1.2], [35, 2.2], [22, 3.2]].forEach(([length, widthValue], index) => {
+        spriteContext.save();
+        spriteContext.rotate((Math.PI / 4) * index);
+        spriteContext.lineWidth = widthValue;
+        spriteContext.beginPath();
+        spriteContext.moveTo(-length, 0); spriteContext.lineTo(length, 0);
+        spriteContext.moveTo(0, -length); spriteContext.lineTo(0, length);
+        spriteContext.stroke();
+        spriteContext.restore();
+      });
+      return sprite;
+    })();
+
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, lowPower ? 1.5 : 2);
       width = Math.max(1, rect.width);
       height = Math.max(1, rect.height);
       canvas.width = Math.round(width * dpr);
@@ -141,26 +203,42 @@ export default function Home() {
       lastFirework = now;
       const originX = collider.visible ? collider.cx : width * 0.5;
       const originY = collider.visible ? Math.max(100, collider.cy - collider.ry * 1.3) : height * 0.38;
-      const count = lowPower ? 72 : 120;
-      for (let index = 0; index < count && particles.length < maxParticles; index += 1) {
-        const angle = (index / count) * Math.PI * 2 + Math.random() * 0.08;
-        const speed = 95 + Math.random() * 245;
+      bursts.push({ x: originX, y: originY, life: 0.72, maxLife: 0.72, tone: 0, rotation: Math.random() * Math.PI });
+
+      // A five-armed spiral plus a loose ember halo reads as a designed game VFX,
+      // while using fewer particles than an undifferentiated random explosion.
+      const count = Math.round((lowPower ? 68 : 112) * qualityScale);
+      const spiralCount = Math.round(count * 0.72);
+      for (let index = 0; index < count && particles.length < particleBudget; index += 1) {
+        const isSpiral = index < spiralCount;
+        const arm = index % 5;
+        const step = Math.floor(index / 5);
+        const angle = isSpiral
+          ? arm * (Math.PI * 2 / 5) + step * 0.145 + Math.random() * 0.035
+          : Math.random() * Math.PI * 2;
+        const speed = isSpiral ? 145 + step * 9 + Math.random() * 42 : 70 + Math.random() * 210;
+        const tone = isSpiral ? [0, 1, 2, 0, 3][arm] : Math.floor(Math.random() * COLORS.length);
         particles.push({
           x: originX, y: originY, px: originX, py: originY,
           vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
-          radius: 1.8 + Math.random() * 2.8, life: 1.25 + Math.random() * 1.1,
-          maxLife: 2.35, kind: 'spark', color: COLORS[index % COLORS.length],
+          radius: isSpiral ? 2.2 + Math.random() * 2.2 : 1.2 + Math.random() * 2,
+          life: isSpiral ? 1.4 + Math.random() * 1.05 : 0.75 + Math.random() * 1.25,
+          maxLife: 2.45, kind: isSpiral ? 'spark' : 'ember', tone,
+          phase: Math.random() * Math.PI * 2, trail: isSpiral ? 1 : 0.46 + Math.random() * 0.3,
+          collided: false,
         });
       }
     };
 
     const spawnRain = (dt: number) => {
-      const amount = Math.min(8, Math.ceil(dt * (lowPower ? 70 : 120)));
-      for (let index = 0; index < amount && particles.length < maxParticles; index += 1) {
+      const amount = Math.min(6, Math.ceil(dt * (lowPower ? 46 : 78) * qualityScale));
+      for (let index = 0; index < amount && particles.length < particleBudget; index += 1) {
         const x = Math.random() * width; const y = -20 - Math.random() * 70;
+        const depth = 0.55 + Math.random() * 0.75;
         particles.push({
-          x, y, px: x, py: y, vx: -18 + Math.random() * 14, vy: 420 + Math.random() * 220,
-          radius: 1.3 + Math.random(), life: 2.4, maxLife: 2.4, kind: 'rain', color: '#76d7ff',
+          x, y, px: x, py: y, vx: (-22 + Math.random() * 14) * depth, vy: (390 + Math.random() * 220) * depth,
+          radius: 0.9 + depth * 1.1, life: 2.6, maxLife: 2.6, kind: 'rain', tone: 1,
+          phase: Math.random() * Math.PI * 2, trail: 0.8 + depth * 0.55, collided: false,
         });
       }
     };
@@ -172,6 +250,7 @@ export default function Home() {
       const dx = particle.x - collider.cx; const dy = particle.y - collider.cy;
       const value = (dx * dx) / (expandedRx * expandedRx) + (dy * dy) / (expandedRy * expandedRy);
       if (value >= 1) return;
+      particle.collided = true;
       const length = Math.sqrt(value) || 0.001;
       const nx = dx / (expandedRx * expandedRx * length);
       const ny = dy / (expandedRy * expandedRy * length);
@@ -182,11 +261,11 @@ export default function Home() {
       particle.y = collider.cy + dy * boundaryScale;
       const velocityAlongNormal = particle.vx * ux + particle.vy * uy;
       if (velocityAlongNormal < 0) {
-        const bounce = particle.kind === 'rain' ? 0.34 : 0.72;
+        const bounce = particle.kind === 'rain' ? 0.34 : particle.kind === 'ember' ? 0.56 : 0.74;
         particle.vx -= (1 + bounce) * velocityAlongNormal * ux;
         particle.vy -= (1 + bounce) * velocityAlongNormal * uy;
       }
-      particle.vx += ux * (particle.kind === 'rain' ? 24 : 42);
+      particle.vx += ux * (particle.kind === 'rain' ? 24 : 44);
     };
 
     const updateMood = (smile: number, jawOpen: number, now: number) => {
@@ -234,28 +313,115 @@ export default function Home() {
       }
       if (smileActive) spawnRain(dt);
       context.clearRect(0, 0, width, height);
-      context.save(); context.globalCompositeOperation = 'lighter';
+
+      // Physics update stays allocation-free; rendering happens in grouped passes below.
       for (let index = particles.length - 1; index >= 0; index -= 1) {
         const particle = particles[index];
         particle.px = particle.x; particle.py = particle.y; particle.life -= dt;
-        particle.vy += (particle.kind === 'rain' ? 520 : 125) * dt;
-        particle.vx *= Math.pow(particle.kind === 'rain' ? 0.994 : 0.985, dt * 60);
+        particle.phase += dt * (particle.kind === 'ember' ? 8 : 4.5);
+        particle.vy += (particle.kind === 'rain' ? 520 : particle.kind === 'ember' ? 155 : 105) * dt;
+        particle.vx *= Math.pow(particle.kind === 'rain' ? 0.994 : particle.kind === 'ember' ? 0.972 : 0.986, dt * 60);
         particle.x += particle.vx * dt; particle.y += particle.vy * dt;
         collideWithHead(particle);
         if (particle.life <= 0 || particle.y > height + 80 || particle.x < -100 || particle.x > width + 100) {
           particles.splice(index, 1); continue;
         }
-        const alpha = clamp(particle.life / Math.min(particle.maxLife, 0.7));
-        context.globalAlpha = alpha * (particle.kind === 'rain' ? 0.72 : 0.95);
-        context.strokeStyle = particle.color; context.fillStyle = particle.color;
-        if (particle.kind === 'rain') {
-          context.lineWidth = particle.radius; context.beginPath();
-          context.moveTo(particle.px, particle.py - 7); context.lineTo(particle.x, particle.y + 8); context.stroke();
-        } else {
-          context.beginPath(); context.arc(particle.x, particle.y, particle.radius, 0, Math.PI * 2); context.fill();
-          context.globalAlpha *= 0.35; context.lineWidth = particle.radius * 0.8; context.beginPath();
-          context.moveTo(particle.px, particle.py); context.lineTo(particle.x - particle.vx * 0.025, particle.y - particle.vy * 0.025); context.stroke();
+      }
+
+      context.save();
+      context.globalCompositeOperation = 'lighter';
+      context.lineCap = 'round';
+
+      // Layer 1: baked bloom, rotating flare and expanding shockwaves.
+      for (let index = bursts.length - 1; index >= 0; index -= 1) {
+        const burst = bursts[index];
+        burst.life -= dt;
+        if (burst.life <= 0) { bursts.splice(index, 1); continue; }
+        const progress = 1 - burst.life / burst.maxLife;
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const fade = Math.pow(1 - progress, 1.7);
+        const bloomSize = 120 + eased * 290;
+        context.globalAlpha = fade * 0.82;
+        context.drawImage(flareSprite, burst.x - bloomSize / 2, burst.y - bloomSize / 2, bloomSize, bloomSize);
+        context.save();
+        context.translate(burst.x, burst.y); context.rotate(burst.rotation + progress * 0.7);
+        const flareSize = 86 + eased * 120;
+        context.globalAlpha = fade * 0.72;
+        context.drawImage(flareSprite, -flareSize / 2, -flareSize / 2, flareSize, flareSize);
+        context.restore();
+        context.globalAlpha = fade * 0.72;
+        context.strokeStyle = rgba(COLORS[burst.tone], 0.92);
+        context.lineWidth = 1.2 + fade * 2.4;
+        context.beginPath(); context.arc(burst.x, burst.y, 14 + eased * 145, 0, Math.PI * 2); context.stroke();
+        context.globalAlpha = fade * 0.32;
+        context.lineWidth = 1;
+        context.beginPath(); context.arc(burst.x, burst.y, 8 + eased * 210, 0, Math.PI * 2); context.stroke();
+      }
+
+      // Layer 2: rain is batched into two luminous passes instead of one shadow blur per drop.
+      context.globalAlpha = 0.26;
+      context.strokeStyle = 'rgba(44,164,255,.86)';
+      context.lineWidth = 4.6;
+      context.beginPath();
+      for (const particle of particles) {
+        if (particle.kind !== 'rain') continue;
+        const length = Math.min(42, Math.abs(particle.vy) * 0.05 * particle.trail);
+        context.moveTo(particle.x - particle.vx * 0.035, particle.y - length);
+        context.lineTo(particle.x, particle.y + 7);
+      }
+      context.stroke();
+      context.globalAlpha = 0.84;
+      context.strokeStyle = 'rgba(210,247,255,.96)';
+      context.lineWidth = 1.05;
+      context.beginPath();
+      for (const particle of particles) {
+        if (particle.kind !== 'rain') continue;
+        const length = Math.min(34, Math.abs(particle.vy) * 0.043 * particle.trail);
+        context.moveTo(particle.x - particle.vx * 0.03, particle.y - length);
+        context.lineTo(particle.x, particle.y + 6);
+      }
+      context.stroke();
+
+      // Layer 3: grouped colored comet trails need only two strokes per palette tone.
+      for (let tone = 0; tone < COLORS.length; tone += 1) {
+        context.globalAlpha = 0.22;
+        context.strokeStyle = rgba(COLORS[tone], 0.82);
+        context.lineWidth = 5.2;
+        context.beginPath();
+        for (const particle of particles) {
+          if (particle.kind === 'rain' || particle.tone !== tone) continue;
+          const trailTime = (particle.kind === 'spark' ? 0.075 : 0.035) * particle.trail;
+          context.moveTo(particle.x, particle.y);
+          context.lineTo(particle.x - particle.vx * trailTime, particle.y - particle.vy * trailTime);
         }
+        context.stroke();
+        context.globalAlpha = 0.78;
+        context.lineWidth = 1.05;
+        context.beginPath();
+        for (const particle of particles) {
+          if (particle.kind === 'rain' || particle.tone !== tone) continue;
+          const trailTime = (particle.kind === 'spark' ? 0.065 : 0.03) * particle.trail;
+          context.moveTo(particle.x, particle.y);
+          context.lineTo(particle.x - particle.vx * trailTime, particle.y - particle.vy * trailTime);
+        }
+        context.stroke();
+      }
+
+      // Layer 4: draw cached glow sprites. Twinkle is alpha-only, so no new gradients.
+      for (const particle of particles) {
+        if (particle.kind === 'rain') continue;
+        const fade = clamp(particle.life / Math.min(particle.maxLife, particle.kind === 'ember' ? 0.42 : 0.7));
+        const twinkle = particle.kind === 'spark' ? 0.72 + Math.sin(particle.phase) * 0.28 : 0.48 + Math.sin(particle.phase) * 0.2;
+        const collisionBoost = particle.collided ? 1.65 : 1;
+        const size = particle.radius * (particle.kind === 'spark' ? 9 : 6) * collisionBoost;
+        context.globalAlpha = fade * twinkle;
+        context.drawImage(glowSprites[particle.tone], particle.x - size / 2, particle.y - size / 2, size, size);
+        if (particle.collided && particle.kind === 'spark') {
+          const flareSize = size * 2.6;
+          context.globalAlpha = fade * 0.62;
+          context.drawImage(flareSprite, particle.x - flareSize / 2, particle.y - flareSize / 2, flareSize, flareSize);
+        }
+        particle.collided = false;
       }
       context.restore();
       if (mode === 'demo' && collider.visible) {
@@ -265,7 +431,21 @@ export default function Home() {
       }
       if (now - lastMetricUpdate > 1000) {
         const elapsed = Math.max(0.1, (now - lastMetricUpdate) / 1000);
-        setMetrics({ fps: Math.round(framesForMetric / elapsed), inference: Math.round(inferenceCount / elapsed), particles: particles.length, tier: lowPower ? '节能' : '标准' });
+        const measuredFps = Math.round(framesForMetric / elapsed);
+        if (measuredFps < 43) { slowSamples += 1; fastSamples = 0; }
+        else if (measuredFps > 56) { fastSamples += 1; slowSamples = 0; }
+        else { slowSamples = 0; fastSamples = 0; }
+        if (slowSamples >= 2) {
+          qualityScale = Math.max(0.62, qualityScale - 0.12); slowSamples = 0;
+          particleBudget = Math.round(baseParticleBudget * qualityScale);
+        } else if (fastSamples >= 3) {
+          qualityScale = Math.min(1, qualityScale + 0.08); fastSamples = 0;
+          particleBudget = Math.round(baseParticleBudget * qualityScale);
+        }
+        setMetrics({
+          fps: measuredFps, inference: Math.round(inferenceCount / elapsed), particles: particles.length,
+          budget: particleBudget, tier: `${lowPower ? '节能精致' : '影院'} ${Math.round(qualityScale * 100)}%`,
+        });
         lastMetricUpdate = now; framesForMetric = 0; inferenceCount = 0;
       }
     };
@@ -348,8 +528,8 @@ export default function Home() {
         {showMetrics && (
           <aside className="metrics" aria-label="实时性能数据">
             <div><span>渲染</span><b>{metrics.fps} FPS</b></div><div><span>推理</span><b>{metrics.inference} 次/秒</b></div>
-            <div><span>粒子</span><b>{metrics.particles} / {metrics.tier === '节能' ? 220 : 420}</b></div><div><span>档位</span><b>{metrics.tier}</b></div>
-            <p>识别与渲染均在本机完成，视频不会上传。</p>
+            <div><span>粒子</span><b>{metrics.particles} / {metrics.budget}</b></div><div><span>档位</span><b>{metrics.tier}</b></div>
+            <p>发光纹理已预烘焙并复用；识别与渲染均在本机完成，视频不会上传。</p>
           </aside>
         )}
 
