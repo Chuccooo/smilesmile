@@ -116,6 +116,7 @@ export default function Home() {
     let width = 1;
     let height = 1;
     let lastFrame = performance.now();
+    const experienceStartedAt = lastFrame;
     let lastInference = 0;
     let lastMetricUpdate = performance.now();
     let framesForMetric = 0;
@@ -430,7 +431,7 @@ export default function Home() {
 
     const infer = (now: number) => {
       if (mode === 'demo') {
-        const cycle = (now / 1000) % 16;
+        const cycle = ((now - experienceStartedAt) / 1000) % 16;
         const demoSmile = cycle > 1.2 && cycle < 13.8 ? 0.68 : 0.08;
         const demoJaw = cycle > 3.2 && cycle < 10.2 ? 0.78 : 0.05;
         collider.visible = true;
