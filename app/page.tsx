@@ -30,9 +30,28 @@ type FaceLandmarkerLike = {
   close?: () => void;
 };
 
-const VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs';
-const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
-const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
+const LOCAL_VISION_URL = 'mediapipe/vision_bundle.mjs';
+const LOCAL_WASM_URL = 'mediapipe/wasm';
+const LOCAL_MODEL_URL = 'mediapipe/face_landmarker.task';
+const CDN_VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs';
+const CDN_WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
+const CDN_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
+
+async function probeAsset(url: string) {
+  try {
+    const res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveAssetUrls() {
+  if ((await probeAsset(LOCAL_VISION_URL)) && (await probeAsset(LOCAL_MODEL_URL))) {
+    return { vision: LOCAL_VISION_URL, wasm: LOCAL_WASM_URL, model: LOCAL_MODEL_URL };
+  }
+  return { vision: CDN_VISION_URL, wasm: CDN_WASM_URL, model: CDN_MODEL_URL };
+}
 const COLORS = ['#edfaff', '#8de4ff', '#88a8ff', '#b89cff', '#77e4dc', '#ffd0b4'];
 
 function rgba(hex: string, alpha: number) {
@@ -855,23 +874,23 @@ export default function Home() {
       const video = videoRef.current;
       if (!video) throw new Error('Video element unavailable');
       video.srcObject = stream; await video.play();
-      const visionModuleUrl = VISION_URL;
+      const { vision: visionModuleUrl, wasm: wasmUrl, model: modelUrl } = await resolveAssetUrls();
       const visionModule = (await import(/* @vite-ignore */ visionModuleUrl)) as {
         FilesetResolver: { forVisionTasks: (root: string) => Promise<unknown> };
         FaceLandmarker: { createFromOptions: (fileset: unknown, options: object) => Promise<FaceLandmarkerLike> };
       };
-      const fileset = await visionModule.FilesetResolver.forVisionTasks(WASM_URL);
+      const fileset = await visionModule.FilesetResolver.forVisionTasks(wasmUrl);
       const commonOptions = {
         runningMode: 'VIDEO', numFaces: 1, outputFaceBlendshapes: true,
         minFaceDetectionConfidence: 0.55, minFacePresenceConfidence: 0.55, minTrackingConfidence: 0.5,
       };
       try {
         landmarkerRef.current = await visionModule.FaceLandmarker.createFromOptions(fileset, {
-          ...commonOptions, baseOptions: { modelAssetPath: MODEL_URL, delegate: 'GPU' },
+          ...commonOptions, baseOptions: { modelAssetPath: modelUrl, delegate: 'GPU' },
         });
       } catch {
         landmarkerRef.current = await visionModule.FaceLandmarker.createFromOptions(fileset, {
-          ...commonOptions, baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },
+          ...commonOptions, baseOptions: { modelAssetPath: modelUrl, delegate: 'CPU' },
         });
       }
       setStatus('ready'); runExperience('camera');
