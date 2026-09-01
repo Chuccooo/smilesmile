@@ -8,10 +8,16 @@ type Mood = 'neutral' | 'smile' | 'laugh';
 type Particle = {
   x: number; y: number; px: number; py: number; vx: number; vy: number;
   radius: number; life: number; maxLife: number;
-  kind: 'rain' | 'spark' | 'ember' | 'splash' | 'willow';
+  kind: 'rain' | 'spark' | 'ember' | 'splash' | 'willow' | 'star';
   tone: number; phase: number; trail: number; collided: boolean;
+  delay?: number; depth?: 0 | 1 | 2; style?: 0 | 1 | 2;
+  brightness?: number; rotation?: number; starVariant?: 0 | 1 | 2;
 };
-type Burst = { x: number; y: number; life: number; maxLife: number; tone: number; rotation: number; kind: 'firework' | 'water' | 'curtain' };
+type Burst = {
+  x: number; y: number; life: number; maxLife: number; tone: number; rotation: number;
+  kind: 'firework' | 'water' | 'curtain'; delay?: number; style?: 0 | 1 | 2;
+  brightness?: number; scale?: number; spokes?: number;
+};
 type FaceCollider = { cx: number; cy: number; rx: number; ry: number; visible: boolean };
 type Blendshape = { categoryName: string; score: number };
 type Landmark = { x: number; y: number; z: number };
@@ -27,7 +33,7 @@ type FaceLandmarkerLike = {
 const VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs';
 const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
-const COLORS = ['#e9fbff', '#8de4ff', '#88a8ff', '#b89cff'];
+const COLORS = ['#edfaff', '#8de4ff', '#88a8ff', '#b89cff', '#77e4dc', '#ffd0b4'];
 
 function rgba(hex: string, alpha: number) {
   const value = hex.replace('#', '');
@@ -75,11 +81,13 @@ export default function Home() {
   const frameRef = useRef(0);
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   const sensitivityRef = useRef(0.72);
+  const fireworkDensityRef = useRef(1);
   const [status, setStatus] = useState<Status>('idle');
   const [mood, setMood] = useState<Mood>('neutral');
   const [error, setError] = useState('');
   const [showMetrics, setShowMetrics] = useState(false);
   const [sensitivity, setSensitivity] = useState(72);
+  const [fireworkDensity, setFireworkDensity] = useState(100);
   const [metrics, setMetrics] = useState({
     fps: 0, inference: 0, particles: 0, budget: 300, tier: '影院',
     smile: 0, jaw: 0, smileThreshold: 0.34, laughThreshold: 0.58,
@@ -150,6 +158,48 @@ export default function Home() {
       spriteContext.fillRect(0, 0, 80, 80);
       return sprite;
     });
+
+    // Three baked star silhouettes replace coarse white dots. Size, rotation and
+    // alpha vary at runtime, while the expensive gradients stay cached.
+    const starSprites = COLORS.map((color) => [0, 1, 2].map((variant) => {
+      const sprite = document.createElement('canvas');
+      sprite.width = 96; sprite.height = 96;
+      const spriteContext = sprite.getContext('2d');
+      if (!spriteContext) return sprite;
+      const halo = spriteContext.createRadialGradient(48, 48, 0, 48, 48, 42);
+      halo.addColorStop(0, 'rgba(255,255,255,1)');
+      halo.addColorStop(0.07, rgba(color, 0.96));
+      halo.addColorStop(0.24, rgba(color, 0.42));
+      halo.addColorStop(1, rgba(color, 0));
+      spriteContext.globalAlpha = 0.62;
+      spriteContext.fillStyle = halo;
+      spriteContext.fillRect(0, 0, 96, 96);
+      spriteContext.translate(48, 48);
+      spriteContext.globalCompositeOperation = 'lighter';
+      const axes = variant === 0 ? 2 : variant === 1 ? 3 : 4;
+      for (let axis = 0; axis < axes; axis += 1) {
+        const angle = axis * Math.PI / axes;
+        const length = axis === 0 ? 38 : variant === 0 ? 17 : 21 + (axis % 2) * 7;
+        const ray = spriteContext.createLinearGradient(-length, 0, length, 0);
+        ray.addColorStop(0, rgba(color, 0));
+        ray.addColorStop(0.4, rgba(color, 0.58));
+        ray.addColorStop(0.5, 'rgba(255,255,255,.98)');
+        ray.addColorStop(0.6, rgba(color, 0.58));
+        ray.addColorStop(1, rgba(color, 0));
+        spriteContext.save();
+        spriteContext.rotate(angle);
+        spriteContext.strokeStyle = ray;
+        spriteContext.lineWidth = axis === 0 ? 1.15 : 0.68;
+        spriteContext.beginPath();
+        spriteContext.moveTo(-length, 0);
+        spriteContext.quadraticCurveTo(0, axis % 2 ? 0.5 : -0.35, length, 0);
+        spriteContext.stroke();
+        spriteContext.restore();
+      }
+      spriteContext.fillStyle = 'rgba(255,255,255,.98)';
+      spriteContext.beginPath(); spriteContext.arc(0, 0, 1.45, 0, Math.PI * 2); spriteContext.fill();
+      return sprite;
+    }));
 
     const flareSprite = (() => {
       const sprite = document.createElement('canvas');
@@ -247,9 +297,10 @@ export default function Home() {
         tone: 2, rotation: Math.random() * Math.PI, kind: 'firework',
       });
 
-      const outerCount = Math.round((lowPower ? 72 : 126) * qualityScale);
-      const innerCount = Math.round((lowPower ? 38 : 64) * qualityScale);
-      const dustCount = Math.round((lowPower ? 24 : 46) * qualityScale);
+      const density = fireworkDensityRef.current;
+      const outerCount = Math.round((lowPower ? 72 : 126) * qualityScale * density);
+      const innerCount = Math.round((lowPower ? 38 : 64) * qualityScale * density);
+      const dustCount = Math.round((lowPower ? 24 : 46) * qualityScale * density);
       const goldenAngle = Math.PI * (3 - Math.sqrt(5));
 
       for (let index = 0; index < outerCount && particles.length < particleBudget; index += 1) {
@@ -294,53 +345,93 @@ export default function Home() {
     const spawnWaterfall = (now: number) => {
       waterfallUntil = now + 1980;
 
-      // Give the two-second hero effect the existing budget instead of raising it.
-      // Old rain, splashes and embers are cheaper to retire than to render beneath it.
-      for (let index = particles.length - 1; index >= 0; index -= 1) {
-        if (particles[index].kind !== 'spark') particles.splice(index, 1);
-      }
-      for (let index = bursts.length - 1; index >= 0; index -= 1) {
-        if (bursts[index].kind === 'water') bursts.splice(index, 1);
-      }
+      // Reuse the existing device budget for the two-second hero effect. Clearing
+      // previous rain/fireworks prevents an invisible budget spike at the handoff.
+      particles.length = 0;
+      bursts.length = 0;
 
       bursts.push({
         x: width * 0.5, y: 0, life: 1.98, maxLife: 1.98,
         tone: 1, rotation: 0, kind: 'curtain',
       });
 
-      const emitterCount = lowPower ? 5 : 7;
-      const desiredCount = Math.round((lowPower ? 132 : 236) * qualityScale);
+      const emitterCount = lowPower ? 6 : 8;
+      const desiredCount = Math.round((lowPower ? 138 : 244) * qualityScale * fireworkDensityRef.current);
       const availableCount = Math.max(0, Math.min(desiredCount, particleBudget - particles.length));
-      const perEmitter = Math.max(1, Math.ceil(availableCount / emitterCount));
+      const starCount = Math.min(Math.round(availableCount * 0.18), lowPower ? 26 : 44);
+      const willowCount = Math.max(0, availableCount - starCount);
+      const perEmitter = Math.max(1, Math.ceil(willowCount / emitterCount));
+      const styleOffset = Math.floor(Math.random() * 3);
       let created = 0;
 
-      for (let emitter = 0; emitter < emitterCount && created < availableCount; emitter += 1) {
+      const pickTone = () => {
+        const roll = Math.random();
+        if (roll < 0.34) return 1;
+        if (roll < 0.55) return 2;
+        if (roll < 0.69) return 3;
+        if (roll < 0.81) return 0;
+        if (roll < 0.93) return 4;
+        return 5;
+      };
+
+      for (let emitter = 0; emitter < emitterCount && created < willowCount; emitter += 1) {
+        const pairRank = Math.floor(Math.abs(emitter - (emitterCount - 1) / 2));
+        const emitterDelay = pairRank * 0.1 + Math.random() * 0.018;
+        const style = ((emitter + styleOffset) % 3) as 0 | 1 | 2;
+        const scale = style === 0 ? 0.96 + Math.random() * 0.26 : style === 1 ? 0.8 + Math.random() * 0.32 : 0.74 + Math.random() * 0.22;
+        const brightness = Math.min(1.12, 0.56 + Math.random() * 0.48 + (pairRank === 0 ? 0.08 : 0));
         const originX = width * ((emitter + 0.5) / emitterCount) + (Math.random() - 0.5) * width * 0.035;
-        const originY = height * (0.105 + (emitter % 2) * 0.045);
+        const originY = height * (0.09 + pairRank * 0.018 + Math.random() * 0.012);
         bursts.push({
-          x: originX, y: originY, life: 0.52, maxLife: 0.52,
-          tone: emitter % 3 === 0 ? 2 : 1,
-          rotation: Math.random() * Math.PI, kind: 'firework',
+          x: originX, y: originY, life: 0.56, maxLife: 0.56,
+          tone: emitter % 5 === 0 ? 5 : emitter % 3 === 0 ? 3 : emitter % 2 === 0 ? 2 : 1,
+          rotation: Math.random() * Math.PI, kind: 'firework', delay: emitterDelay,
+          style, brightness, scale, spokes: style === 0 ? 14 : style === 1 ? 18 : 10,
         });
 
-        for (let strand = 0; strand < perEmitter && created < availableCount && particles.length < particleBudget; strand += 1) {
+        for (let strand = 0; strand < perEmitter && created < willowCount && particles.length < particleBudget; strand += 1) {
           const normalized = perEmitter <= 1 ? 0.5 : strand / (perEmitter - 1);
-          const angle = -Math.PI * 0.92 + normalized * Math.PI * 0.84 + (Math.random() - 0.5) * 0.045;
-          const speed = 105 + Math.sin(normalized * Math.PI) * 92 + Math.random() * 38;
-          const life = 1.45 + Math.random() * 0.48;
+          const depthRoll = Math.random();
+          const depth = (depthRoll < 0.3 ? 0 : depthRoll < 0.8 ? 1 : 2) as 0 | 1 | 2;
+          const styleSpread = style === 0 ? 0.8 : style === 1 ? 0.98 : 0.58;
+          const spread = styleSpread * (depth === 0 ? 1.06 : depth === 1 ? 0.94 : 0.82);
+          const angle = -Math.PI * (0.5 + spread / 2) + normalized * Math.PI * spread + (Math.random() - 0.5) * 0.09;
+          const speedFactor = style === 0 ? 1 : style === 1 ? 1.12 : 0.86;
+          const speed = (92 + Math.sin(normalized * Math.PI) * 92 + Math.random() * 42) * speedFactor * (0.84 + depth * 0.12);
+          const lifeOffset = style === 0 ? 0.1 : style === 1 ? -0.1 : 0.15;
+          const life = Math.min(1.92 - emitterDelay, 1.62 + lifeOffset - depth * 0.08 + Math.random() * 0.12);
           particles.push({
             x: originX, y: originY, px: originX, py: originY,
             vx: Math.cos(angle) * speed * 0.74,
             vy: Math.sin(angle) * speed * 0.92,
-            radius: 0.75 + Math.random() * 1.1,
+            radius: (0.62 + depth * 0.2 + Math.random() * 0.88) * (style === 1 ? 0.88 : 1),
             life, maxLife: life, kind: 'willow',
-            tone: strand % 11 === 0 ? 0 : strand % 5 === 0 ? 2 : 1,
+            tone: pickTone(),
             phase: Math.random() * Math.PI * 2,
-            trail: 0.78 + Math.random() * 0.62,
-            collided: false,
+            trail: 0.42 + Math.random() * 0.42,
+            collided: false, delay: emitterDelay + depth * 0.025 + Math.random() * 0.09,
+            depth, style, brightness: Math.min(1.15, brightness * (0.66 + Math.random() * 0.5)),
+            rotation: Math.random() * Math.PI,
           });
           created += 1;
         }
+      }
+
+      const starTones = [0, 3, 0, 4, 2, 0, 5, 1];
+      for (let index = 0; index < starCount && particles.length < particleBudget; index += 1) {
+        const depthRoll = Math.random();
+        const depth = (depthRoll < 0.58 ? 0 : depthRoll < 0.9 ? 1 : 2) as 0 | 1 | 2;
+        const life = 0.78 + Math.random() * 0.86;
+        particles.push({
+          x: Math.random() * width, y: height * (0.06 + Math.random() * 0.66),
+          px: 0, py: 0, vx: (Math.random() - 0.5) * (3 + depth * 4), vy: 3 + depth * 5 + Math.random() * 7,
+          radius: depth === 0 ? 0.48 + Math.random() * 0.4 : depth === 1 ? 0.78 + Math.random() * 0.58 : 1.25 + Math.random() * 0.65,
+          life, maxLife: life, kind: 'star', tone: starTones[index % starTones.length],
+          phase: Math.random() * Math.PI * 2, trail: 0, collided: false,
+          delay: 0.05 + Math.random() * 0.92, depth,
+          brightness: depth === 0 ? 0.18 + Math.random() * 0.28 : depth === 1 ? 0.46 + Math.random() * 0.36 : 0.86 + Math.random() * 0.28,
+          rotation: Math.random() * Math.PI, starVariant: (index % 3) as 0 | 1 | 2,
+        });
       }
     };
 
@@ -464,10 +555,16 @@ export default function Home() {
       // Physics update stays allocation-free; rendering happens in grouped passes below.
       for (let index = particles.length - 1; index >= 0; index -= 1) {
         const particle = particles[index];
+        if ((particle.delay ?? 0) > 0) {
+          particle.delay = Math.max(0, (particle.delay ?? 0) - dt);
+          particle.px = particle.x; particle.py = particle.y;
+          continue;
+        }
         particle.px = particle.x; particle.py = particle.y; particle.life -= dt;
-        particle.phase += dt * (particle.kind === 'ember' ? 8 : particle.kind === 'splash' ? 7 : particle.kind === 'willow' ? 5.5 : 4.5);
-        particle.vy += (particle.kind === 'rain' ? 520 : particle.kind === 'ember' ? 155 : particle.kind === 'splash' ? 280 : particle.kind === 'willow' ? 330 : 105) * dt;
-        particle.vx *= Math.pow(particle.kind === 'rain' ? 0.994 : particle.kind === 'ember' ? 0.972 : particle.kind === 'splash' ? 0.982 : particle.kind === 'willow' ? 0.992 : 0.986, dt * 60);
+        particle.phase += dt * (particle.kind === 'ember' ? 8 : particle.kind === 'splash' ? 7 : particle.kind === 'willow' ? 5.5 : particle.kind === 'star' ? 6.5 : 4.5);
+        const styleLift = particle.kind === 'willow' ? particle.style === 0 ? 18 : particle.style === 1 ? -16 : 30 : 0;
+        particle.vy += (particle.kind === 'rain' ? 520 : particle.kind === 'ember' ? 155 : particle.kind === 'splash' ? 280 : particle.kind === 'willow' ? 292 + styleLift : particle.kind === 'star' ? 12 : 105) * dt;
+        particle.vx *= Math.pow(particle.kind === 'rain' ? 0.994 : particle.kind === 'ember' ? 0.972 : particle.kind === 'splash' ? 0.982 : particle.kind === 'willow' ? 0.987 : particle.kind === 'star' ? 0.994 : 0.986, dt * 60);
         particle.x += particle.vx * dt; particle.y += particle.vy * dt;
         if (particle.kind === 'rain' && collideWithHead(particle)) {
           spawnSplash(particle.x, particle.y, Math.min(1.4, particle.vy / 450));
@@ -487,6 +584,10 @@ export default function Home() {
       // Layer 1: baked bloom, rotating flare and expanding shockwaves.
       for (let index = bursts.length - 1; index >= 0; index -= 1) {
         const burst = bursts[index];
+        if ((burst.delay ?? 0) > 0) {
+          burst.delay = Math.max(0, (burst.delay ?? 0) - dt);
+          continue;
+        }
         burst.life -= dt;
         if (burst.life <= 0) { bursts.splice(index, 1); continue; }
         const progress = 1 - burst.life / burst.maxLife;
@@ -507,22 +608,54 @@ export default function Home() {
           context.stroke();
           continue;
         }
-        const bloomSize = 120 + eased * 290;
-        context.globalAlpha = fade * 0.82;
+        const brightness = burst.brightness ?? 1;
+        const burstScale = burst.scale ?? 1;
+        const bloomSize = (120 + eased * 290) * burstScale;
+        context.globalAlpha = fade * 0.82 * brightness;
         context.drawImage(flareSprite, burst.x - bloomSize / 2, burst.y - bloomSize / 2, bloomSize, bloomSize);
         context.save();
         context.translate(burst.x, burst.y); context.rotate(burst.rotation + progress * 0.7);
-        const flareSize = 86 + eased * 120;
-        context.globalAlpha = fade * 0.72;
+        const flareSize = (86 + eased * 120) * burstScale;
+        context.globalAlpha = fade * 0.72 * brightness;
         context.drawImage(flareSprite, -flareSize / 2, -flareSize / 2, flareSize, flareSize);
         context.restore();
-        context.globalAlpha = fade * 0.72;
+        context.globalAlpha = fade * 0.72 * brightness;
         context.strokeStyle = rgba(COLORS[burst.tone], 0.92);
-        context.lineWidth = 1.2 + fade * 2.4;
-        context.beginPath(); context.arc(burst.x, burst.y, 14 + eased * 145, 0, Math.PI * 2); context.stroke();
-        context.globalAlpha = fade * 0.32;
-        context.lineWidth = 1;
-        context.beginPath(); context.arc(burst.x, burst.y, 8 + eased * 210, 0, Math.PI * 2); context.stroke();
+        if (burst.style === undefined) {
+          context.lineWidth = 1.2 + fade * 2.4;
+          context.beginPath(); context.arc(burst.x, burst.y, 14 + eased * 145, 0, Math.PI * 2); context.stroke();
+          context.globalAlpha = fade * 0.32 * brightness;
+          context.lineWidth = 1;
+          context.beginPath(); context.arc(burst.x, burst.y, 8 + eased * 210, 0, Math.PI * 2); context.stroke();
+        } else {
+          const arcStart = burst.style === 0 ? -Math.PI * 0.9 : burst.style === 1 ? -Math.PI * 1.01 : -Math.PI * 0.76;
+          const arcEnd = burst.style === 0 ? -Math.PI * 0.1 : burst.style === 1 ? Math.PI * 0.01 : -Math.PI * 0.24;
+          const inner = (8 + eased * 34) * burstScale;
+          const outer = (14 + eased * 128) * burstScale;
+          context.lineWidth = 0.65 + fade * 1.5;
+          context.beginPath(); context.arc(burst.x, burst.y, outer, arcStart, arcEnd); context.stroke();
+          context.globalAlpha = fade * 0.42 * brightness;
+          context.lineWidth = 0.56;
+          context.beginPath();
+          const spokes = burst.spokes ?? 12;
+          for (let spoke = 0; spoke < spokes; spoke += 1) {
+            const ratio = spoke / Math.max(1, spokes - 1);
+            const angle = arcStart + ratio * (arcEnd - arcStart) + Math.sin(burst.rotation * 7 + spoke * 4.13) * 0.025;
+            const variation = 0.72 + (0.5 + 0.5 * Math.sin(burst.rotation * 11 + spoke * 9.17)) * 0.34;
+            context.moveTo(burst.x + Math.cos(angle) * inner, burst.y + Math.sin(angle) * inner);
+            context.quadraticCurveTo(
+              burst.x + Math.cos(angle + 0.025) * outer * 0.64 * variation,
+              burst.y + Math.sin(angle + 0.025) * outer * 0.64 * variation,
+              burst.x + Math.cos(angle + 0.055) * outer * variation,
+              burst.y + Math.sin(angle + 0.055) * outer * variation,
+            );
+          }
+          context.stroke();
+          if (burst.style === 2) {
+            context.globalAlpha = fade * 0.2 * brightness;
+            context.beginPath(); context.arc(burst.x, burst.y, outer * 1.18, arcStart + 0.08, arcEnd - 0.08); context.stroke();
+          }
+        }
       }
 
       // Layer 2: rain is batched into two luminous passes instead of one shadow blur per drop.
@@ -560,40 +693,60 @@ export default function Home() {
       }
       context.stroke();
 
-      // Layer 3: the full-screen willow is three batched strokes, not hundreds of live blurs.
-      context.globalAlpha = 0.18;
-      context.strokeStyle = 'rgba(77,128,255,.72)';
-      context.lineWidth = 8.5;
-      context.beginPath();
-      for (const particle of particles) {
-        if (particle.kind !== 'willow') continue;
-        const tailTime = 0.34 + particle.trail * 0.13;
-        context.moveTo(particle.x, particle.y);
-        context.lineTo(particle.x - particle.vx * tailTime, particle.y - particle.vy * tailTime);
+      // Layer 3: short curved willow trails taper in three batched segments.
+      // Grouping by depth and tone keeps the richer look below the device budget.
+      const segmentStarts = [1, 0.66, 0.32];
+      const segmentEnds = [0.66, 0.32, 0];
+      const segmentAlpha = [0.14, 0.38, 0.82];
+      const segmentWidth = [0.26, 0.52, 0.92];
+      for (let depth = 0; depth < 3; depth += 1) {
+        const depthAlpha = depth === 0 ? 0.3 : depth === 1 ? 0.68 : 1;
+        const depthWidth = depth === 0 ? 0.58 : depth === 1 ? 0.88 : 1.2;
+        for (let tone = 0; tone < COLORS.length; tone += 1) {
+          context.strokeStyle = rgba(COLORS[tone], 0.94);
+
+          context.globalAlpha = depthAlpha * 0.12;
+          context.lineWidth = depthWidth * 4.6;
+          context.beginPath();
+          for (const particle of particles) {
+            if (particle.kind !== 'willow' || particle.tone !== tone || (particle.depth ?? 1) !== depth || (particle.delay ?? 0) > 0) continue;
+            const tailTime = 0.055 + particle.trail * 0.075;
+            const wave = Math.sin(particle.phase) * (1.2 + depth * 0.8);
+            const tailX = particle.x - particle.vx * tailTime + wave;
+            const tailY = particle.y - particle.vy * tailTime;
+            const midX = particle.x - particle.vx * tailTime * 0.48 - wave * 0.4;
+            const midY = particle.y - particle.vy * tailTime * 0.48;
+            context.moveTo(tailX, tailY);
+            context.quadraticCurveTo(midX, midY, particle.x, particle.y);
+          }
+          context.stroke();
+
+          for (let segment = 0; segment < 3; segment += 1) {
+            context.globalAlpha = depthAlpha * segmentAlpha[segment];
+            context.lineWidth = depthWidth * segmentWidth[segment];
+            context.beginPath();
+            for (const particle of particles) {
+              if (particle.kind !== 'willow' || particle.tone !== tone || (particle.depth ?? 1) !== depth || (particle.delay ?? 0) > 0) continue;
+              const tailTime = 0.055 + particle.trail * 0.075;
+              const start = segmentStarts[segment];
+              const end = segmentEnds[segment];
+              const wave = Math.sin(particle.phase + segment * 1.4) * (0.7 + depth * 0.7);
+              const startX = particle.x - particle.vx * tailTime * start + wave * start;
+              const startY = particle.y - particle.vy * tailTime * start;
+              const endX = particle.x - particle.vx * tailTime * end - wave * end * 0.35;
+              const endY = particle.y - particle.vy * tailTime * end;
+              context.moveTo(startX, startY);
+              context.quadraticCurveTo((startX + endX) / 2 - wave * 0.35, (startY + endY) / 2, endX, endY);
+              if ((particle.style === 0 || particle.phase > 5.2) && segment < 2) {
+                const branch = (segment + 1) * (depth + 1) * 0.52;
+                context.moveTo(startX + branch, startY);
+                context.quadraticCurveTo((startX + endX) / 2 + branch * 1.4, (startY + endY) / 2, endX, endY);
+              }
+            }
+            context.stroke();
+          }
+        }
       }
-      context.stroke();
-      context.globalAlpha = 0.46;
-      context.strokeStyle = 'rgba(112,193,255,.88)';
-      context.lineWidth = 2.1;
-      context.beginPath();
-      for (const particle of particles) {
-        if (particle.kind !== 'willow') continue;
-        const tailTime = 0.31 + particle.trail * 0.12;
-        context.moveTo(particle.x, particle.y);
-        context.lineTo(particle.x - particle.vx * tailTime, particle.y - particle.vy * tailTime);
-      }
-      context.stroke();
-      context.globalAlpha = 0.9;
-      context.strokeStyle = 'rgba(224,250,255,.96)';
-      context.lineWidth = 0.55;
-      context.beginPath();
-      for (const particle of particles) {
-        if (particle.kind !== 'willow') continue;
-        const tailTime = 0.28 + particle.trail * 0.1;
-        context.moveTo(particle.x, particle.y);
-        context.lineTo(particle.x - particle.vx * tailTime, particle.y - particle.vy * tailTime);
-      }
-      context.stroke();
 
       // Layer 4: grouped colored comet trails need only two strokes per palette tone.
       for (let tone = 0; tone < COLORS.length; tone += 1) {
@@ -602,7 +755,7 @@ export default function Home() {
         context.lineWidth = 5.2;
         context.beginPath();
         for (const particle of particles) {
-          if (particle.kind === 'rain' || particle.kind === 'splash' || particle.kind === 'willow' || particle.tone !== tone) continue;
+          if (particle.kind === 'rain' || particle.kind === 'splash' || particle.kind === 'willow' || particle.kind === 'star' || particle.tone !== tone || (particle.delay ?? 0) > 0) continue;
           const trailTime = (particle.kind === 'spark' ? 0.075 : 0.035) * particle.trail;
           context.moveTo(particle.x, particle.y);
           context.lineTo(particle.x - particle.vx * trailTime, particle.y - particle.vy * trailTime);
@@ -612,7 +765,7 @@ export default function Home() {
         context.lineWidth = 1.05;
         context.beginPath();
         for (const particle of particles) {
-          if (particle.kind === 'rain' || particle.kind === 'splash' || particle.kind === 'willow' || particle.tone !== tone) continue;
+          if (particle.kind === 'rain' || particle.kind === 'splash' || particle.kind === 'willow' || particle.kind === 'star' || particle.tone !== tone || (particle.delay ?? 0) > 0) continue;
           const trailTime = (particle.kind === 'spark' ? 0.065 : 0.03) * particle.trail;
           context.moveTo(particle.x, particle.y);
           context.lineTo(particle.x - particle.vx * trailTime, particle.y - particle.vy * trailTime);
@@ -622,13 +775,28 @@ export default function Home() {
 
       // Layer 5: draw cached glow sprites. Twinkle is alpha-only, so no new gradients.
       for (const particle of particles) {
-        if (particle.kind === 'rain') continue;
+        if (particle.kind === 'rain' || (particle.delay ?? 0) > 0) continue;
         const fade = clamp(particle.life / Math.min(particle.maxLife, particle.kind === 'ember' ? 0.42 : 0.7));
-        const twinkle = particle.kind === 'spark' ? 0.72 + Math.sin(particle.phase) * 0.28 : particle.kind === 'willow' ? 0.62 + Math.sin(particle.phase) * 0.28 : 0.48 + Math.sin(particle.phase) * 0.2;
+        const twinkle = particle.kind === 'spark' ? 0.72 + Math.sin(particle.phase) * 0.28 : particle.kind === 'willow' ? 0.62 + Math.sin(particle.phase) * 0.28 : particle.kind === 'star' ? 0.5 + Math.sin(particle.phase) * 0.5 : 0.48 + Math.sin(particle.phase) * 0.2;
         const collisionBoost = particle.collided ? 1.65 : 1;
-        const size = particle.radius * (particle.kind === 'spark' ? 9 : particle.kind === 'willow' ? 7 : 6) * collisionBoost;
-        context.globalAlpha = fade * twinkle;
-        context.drawImage(glowSprites[particle.tone], particle.x - size / 2, particle.y - size / 2, size, size);
+        const depthScale = particle.depth === 0 ? 0.68 : particle.depth === 2 ? 1.2 : 0.94;
+        const size = particle.radius * (particle.kind === 'spark' ? 9 : particle.kind === 'willow' ? 7 : particle.kind === 'star' ? 18 : 6) * collisionBoost * depthScale;
+        context.globalAlpha = fade * twinkle * (particle.brightness ?? 1);
+        if (particle.kind === 'star') {
+          context.save();
+          context.translate(particle.x, particle.y);
+          context.rotate((particle.rotation ?? 0) + Math.sin(particle.phase * 0.4) * 0.06);
+          context.drawImage(starSprites[particle.tone][particle.starVariant ?? 0], -size / 2, -size / 2, size, size);
+          context.restore();
+        } else if (particle.kind === 'willow' && (particle.tone === 0 || particle.phase > 5.55)) {
+          context.save();
+          context.translate(particle.x, particle.y);
+          context.rotate((particle.rotation ?? 0) + particle.phase * 0.035);
+          context.drawImage(starSprites[particle.tone][2], -size * 0.62, -size * 0.62, size * 1.24, size * 1.24);
+          context.restore();
+        } else {
+          context.drawImage(glowSprites[particle.tone], particle.x - size / 2, particle.y - size / 2, size, size);
+        }
         if (particle.collided && (particle.kind === 'spark' || particle.kind === 'willow')) {
           const flareSize = size * 2.6;
           context.globalAlpha = fade * 0.62;
@@ -651,6 +819,10 @@ export default function Home() {
         if (slowSamples >= 2) {
           qualityScale = Math.max(0.62, qualityScale - 0.12); slowSamples = 0;
           particleBudget = Math.round(baseParticleBudget * qualityScale);
+          while (particles.length > particleBudget) {
+            const expendable = particles.findLastIndex((particle) => particle.kind === 'star' || particle.kind === 'rain' || particle.kind === 'ember');
+            particles.splice(expendable >= 0 ? expendable : particles.length - 1, 1);
+          }
         } else if (fastSamples >= 3) {
           qualityScale = Math.min(1, qualityScale + 0.08); fastSamples = 0;
           particleBudget = Math.round(baseParticleBudget * qualityScale);
@@ -755,12 +927,24 @@ export default function Home() {
               />
               <small>调高更容易触发；过高可能把说话误判为大笑</small>
             </label>
+            <label className="sensitivity-control density-control">
+              <span className="sensitivity-head"><span>烟花数量</span><b>{fireworkDensity}%</b></span>
+              <input
+                type="range" min="40" max="100" step="5" value={fireworkDensity}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  setFireworkDensity(next); fireworkDensityRef.current = next / 100;
+                }}
+                aria-label="烟花粒子数量"
+              />
+              <small>控制普通烟花与瀑布密度；不会突破设备粒子预算</small>
+            </label>
             <div><span>微笑分数 / 阈值</span><b>{metrics.smile.toFixed(2)} / {metrics.smileThreshold.toFixed(2)}</b></div>
             <div><span>张嘴分数</span><b>{metrics.jaw.toFixed(2)}</b></div>
             <div><span>大笑阈值</span><b>{metrics.laughThreshold.toFixed(2)}</b></div>
             <div><span>渲染</span><b>{metrics.fps} FPS</b></div><div><span>推理</span><b>{metrics.inference} 次/秒</b></div>
             <div><span>粒子</span><b>{metrics.particles} / {metrics.budget}</b></div><div><span>档位</span><b>{metrics.tier}</b></div>
-            <p>冷色发光纹理已预烘焙并复用；识别与渲染均在本机完成，视频不会上传。</p>
+            <p>星芒与发光纹理已预烘焙复用；数量滑块受设备预算和自动降载双重保护，视频不会上传。</p>
           </aside>
         )}
 
