@@ -30,9 +30,9 @@ type FaceLandmarkerLike = {
   close?: () => void;
 };
 
-const LOCAL_VISION_URL = 'mediapipe/vision_bundle.mjs';
-const LOCAL_WASM_URL = 'mediapipe/wasm';
-const LOCAL_MODEL_URL = 'mediapipe/face_landmarker.task';
+const LOCAL_VISION_PATH = 'mediapipe/vision_bundle.mjs';
+const LOCAL_WASM_PATH = 'mediapipe/wasm';
+const LOCAL_MODEL_PATH = 'mediapipe/face_landmarker.task';
 const CDN_VISION_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs';
 const CDN_WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm';
 const CDN_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task';
@@ -47,8 +47,17 @@ async function probeAsset(url: string) {
 }
 
 async function resolveAssetUrls() {
-  if ((await probeAsset(LOCAL_VISION_URL)) && (await probeAsset(LOCAL_MODEL_URL))) {
-    return { vision: LOCAL_VISION_URL, wasm: LOCAL_WASM_URL, model: LOCAL_MODEL_URL };
+  // Dynamic import() treats "mediapipe/..." as a bare package specifier. Build
+  // absolute URLs from the current page directory so GitHub Pages subpaths,
+  // custom domains and ordinary root hosting all resolve the same assets.
+  const pageBaseUrl = new URL('./', window.location.href);
+  const localUrls = {
+    vision: new URL(LOCAL_VISION_PATH, pageBaseUrl).href,
+    wasm: new URL(LOCAL_WASM_PATH, pageBaseUrl).href,
+    model: new URL(LOCAL_MODEL_PATH, pageBaseUrl).href,
+  };
+  if ((await probeAsset(localUrls.vision)) && (await probeAsset(localUrls.model))) {
+    return localUrls;
   }
   return { vision: CDN_VISION_URL, wasm: CDN_WASM_URL, model: CDN_MODEL_URL };
 }
