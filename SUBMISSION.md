@@ -2,13 +2,13 @@
 
 ## 1. Live Demo
 
-`部署完成后将在线链接粘贴到这里`
+[https://smile-storm-ar-2026.cccljoan.chatgpt.site/](https://smile-storm-ar-2026.cccljoan.chatgpt.site/)
 
 体验建议：首次进入请允许摄像头；微笑触发雨，张嘴大笑触发烟花，移动头部可撞开粒子。若设备无摄像头，可点击演示模式验证完整交互。
 
 ## 2. Source Code
 
-`创建 Public GitHub 仓库后将仓库链接粘贴到这里`
+[https://github.com/Chuccooo/smilesmile](https://github.com/Chuccooo/smilesmile)
 
 代码仓库内 README 已包含架构、运行方式、性能策略、隐私说明、边缘情况与已知限制。
 
